@@ -10,8 +10,7 @@ from torch.utils.data import DataLoader
 import time
 import numpy as np
 
-if os.environ.get('USE_IPEX') == "1":
-    import intel_pytorch_extension as ipex
+import intel_pytorch_extension as ipex
 
 
 def parse_args():
@@ -41,7 +40,7 @@ def parse_args():
                         help='input image sizes (e.g 1400 1400,1200 1200')
     parser.add_argument('--strides', default=[3,3,2,2,2,2], type=int, nargs='+',
                         help='stides for ssd model must include 6 numbers')
-    parser.add_argument('--use-fp16', action='store_true')
+    parser.add_argument('--bf16', action='store_true',help='use bf16')
     parser.add_argument('--ipex', action='store_true', default=False,
                         help='use intel pytorch extension')
     parser.add_argument('--int8', action='store_true', default=False,
@@ -132,25 +131,38 @@ def coco_eval(model, val_dataloader, cocoGt, encoder, inv_map, args):
         prefix='Test: ')
 
     start = time.time()
-    if args.ipex and args.int8:
-        if args.calibration:
-            print("runing int8 calibration step\n")
-            conf = ipex.AmpConf(torch.int8)
-            for nbatch, (img, img_id, img_size, bbox, label) in enumerate(val_dataloader):
-                with torch.no_grad():
-                    with ipex.AutoMixPrecision(conf, running_mode="calibration"):
-                        inp = img.to(ipex.DEVICE)
-                        start_time = time.time()
-                        ploc, plabel,_ = model(inp)
-                        inference_time.update(time.time() - start_time)
-                        end_time = time.time()
+    if args.bf16:
+        if args.dummy:
+            print('runing bf16 dummy inputs inference path')
+            img = torch.randn(args.batch_size, 3, 1200, 1200)
+            with ipex.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                for nbatch in range(args.iteration):
+                    with torch.no_grad():
+                        if nbatch >= args.warmup_iterations:
+                            start_time=time.time()
+                        ploc, plabel,_ = model(img)
+                        if nbatch >= args.warmup_iterations:
+                            inference_time.update(time.time() - start_time)
+                        if nbatch % args.print_freq == 0:
+                            progress.display(nbatch)
+        else:
+            print('runing bf16 real inputs path')
+            with ipex.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                for nbatch, (img, img_id, img_size, bbox, label) in enumerate(val_dataloader):
+                    with torch.no_grad():
+                        if nbatch >= args.warmup_iterations:
+                            start_time=time.time()
+                        ploc, plabel,_ = model(img)
+                        if nbatch >= args.warmup_iterations:
+                            inference_time.update(time.time() - start_time)
+                            end_time = time.time()
                         try:
-                            results = encoder.decode_batch(ploc.to('cpu'), plabel.to('cpu'), 0.50, 200,device=device)
+                            results = encoder.decode_batch(ploc, plabel, 0.50, 200,device=device)
                         except:
-                            #raise
                             print("No object detected in idx: {}".format(idx))
                             continue
-                        decoding_time.update(time.time() - end_time)
+                        if nbatch >= args.warmup_iterations:
+                            decoding_time.update(time.time() - end_time)
                         (htot, wtot) = [d.cpu().numpy() for d in img_size]
                         img_id = img_id.cpu().numpy()
                         # Iterate over batch elements
@@ -168,68 +180,11 @@ def coco_eval(model, val_dataloader, cocoGt, encoder, inv_map, args):
                         if nbatch % args.print_freq == 0:
                             progress.display(nbatch)
                         if nbatch == args.iteration:
-                            conf.save(args.configure_dir)
                             break
-        else:
-            conf = ipex.AmpConf(torch.int8, args.configure_dir)
-            if args.dummy:
-                print('runing int8 dummy inputs inference path')
-                img = torch.randn(args.batch_size, 3, 1200, 1200).to(ipex.DEVICE)
-                for nbatch in range(args.iteration):
-                    with torch.no_grad():
-                        with ipex.AutoMixPrecision(conf, running_mode="inference"):
-                            if nbatch >= args.warmup_iterations:
-                                start_time=time.time()
-                            ploc, plabel,_ = model(img)
-                            if nbatch >= args.warmup_iterations:
-                                inference_time.update(time.time() - start_time)
-                            if nbatch % args.print_freq == 0:
-                                progress.display(nbatch)
-            else:
-                print('runing int8 real inputs inference path')
-                for nbatch, (img, img_id, img_size, bbox, label) in enumerate(val_dataloader):
-                    with torch.no_grad():
-                        with ipex.AutoMixPrecision(conf, running_mode="inference"):
-                            inp = img.to(ipex.DEVICE)
-                            if nbatch >= args.warmup_iterations:
-                                start_time=time.time()
-                            ploc, plabel,_ = model(inp)
-                            if nbatch >= args.warmup_iterations:
-                                inference_time.update(time.time() - start_time)
-                                end_time = time.time()
-                            try:
-                                results = encoder.decode_batch(ploc, plabel, 0.50, 200,device=device)
-                            except:
-                                print("No object detected in idx: {}".format(idx))
-                                continue
-                            if nbatch >= args.warmup_iterations:
-                                decoding_time.update(time.time() - end_time)
-                            (htot, wtot) = [d.cpu().numpy() for d in img_size]
-                            img_id = img_id.cpu().numpy()
-                            # Iterate over batch elements
-                            for img_id_, wtot_, htot_, result in zip(img_id, wtot, htot, results):
-                                loc, label, prob = [r.cpu().numpy() for r in result]
-                                # Iterate over image detections
-                                for loc_, label_, prob_ in zip(loc, label, prob):
-                                    ret.append([img_id_, loc_[0]*wtot_, \
-                                                loc_[1]*htot_,
-                                                (loc_[2] - loc_[0])*wtot_,
-                                                (loc_[3] - loc_[1])*htot_,
-                                                prob_,
-                                                inv_map[label_]])
-
-                            if nbatch % args.print_freq == 0:
-                                progress.display(nbatch)
-                            if nbatch == args.iteration:
-                                break
     else:
         if args.dummy:
             print('runing fp32 dummy inputs inference path')
             img = torch.randn(args.batch_size, 3, 1200, 1200)
-            if use_cuda:
-                img = img.to('cuda')
-            elif args.ipex:
-                img = img.to(ipex.DEVICE)
             for nbatch in range(args.iteration):
                 with torch.no_grad():
                     if nbatch >= args.warmup_iterations:
@@ -243,11 +198,6 @@ def coco_eval(model, val_dataloader, cocoGt, encoder, inv_map, args):
             print('runing fp32 real inputs path')
             for nbatch, (img, img_id, img_size, bbox, label) in enumerate(val_dataloader):
                 with torch.no_grad():
-                    if use_cuda:
-                        img = img.to('cuda')
-                    elif args.ipex:
-                        img = img.to(ipex.DEVICE)
-
                     if nbatch >= args.warmup_iterations:
                         start_time=time.time()
                     ploc, plabel,_ = model(img)

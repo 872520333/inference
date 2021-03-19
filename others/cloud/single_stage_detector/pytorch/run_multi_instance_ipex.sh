@@ -22,10 +22,9 @@ fi
 CONFIG_FILE=""
 ARGS=""
 
-if [ "$1" == "int8" ]; then
-    ARGS="$ARGS --int8"
-    CONFIG_FILE="$CONFIG_FILE --configure-dir $3"
-    echo "### running int8 datatype"
+if [ "$1" == "bf16" ]; then
+    ARGS="$ARGS --bf16"
+    echo "### running bf16 datatype"
 else
     echo "### running fp32 datatype"
 fi
@@ -66,8 +65,8 @@ for i in $(seq 1 $LAST_INSTANCE); do
 
     echo "### running on instance $i, numa node $numa_node_i, core list {$start_core_i, $end_core_i}..."
     numactl --physcpubind=$start_core_i-$end_core_i --membind=$numa_node_i python -u infer.py $ARGS \
-        --data $DATA_DIR --device 0 --checkpoint $MODEL_DIR -w 10 -j 0 --ipex --no-cuda --iteration 100 \
-        -b $BATCH_SIZE $CONFIG_FILE 2>&1 | tee $LOG_i &
+        --data $DATA_DIR --device 0 --checkpoint $MODEL_DIR -w 10 -j 0  --no-cuda --iteration 100 \
+        -b $BATCH_SIZE  2>&1 | tee $LOG_i &
 done
 
 numa_node_0=0
@@ -77,8 +76,8 @@ LOG_0=inference_cpu_bs${BATCH_SIZE}_ins0.txt
 
 echo "### running on instance 0, numa node $numa_node_0, core list {$start_core_0, $end_core_0}...\n\n"
 numactl --physcpubind=$start_core_0-$end_core_0 --membind=$numa_node_0 python -u infer.py $ARGS \
-    --data $DATA_DIR --device 0 --checkpoint $MODEL_DIR -w 10 -j 0 --ipex --no-cuda --iteration 100 \
-    -b $BATCH_SIZE $CONFIG_FILE 2>&1 | tee $LOG_0
+    --data $DATA_DIR --device 0 --checkpoint $MODEL_DIR -w 10 -j 0  --no-cuda --iteration 100 \
+    -b $BATCH_SIZE  2>&1 | tee $LOG_0
 
 sleep 10
 echo -e "\n\n Sum sentences/s together:"
