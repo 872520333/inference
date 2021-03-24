@@ -147,7 +147,7 @@ def coco_eval(model, val_dataloader, cocoGt, encoder, inv_map, args):
                             progress.display(nbatch)
         else:
             print('runing bf16 real inputs path')
-            with ipex.amp.autocast(enabled=True, dtype=torch.bfloat16):
+            with ipex.amp.autocast(enabled=True, configure=ipex.conf.AmpConf(torch.bfloat16)):
                 for nbatch, (img, img_id, img_size, bbox, label) in enumerate(val_dataloader):
                     with torch.no_grad():
                         if nbatch >= args.warmup_iterations:
@@ -167,7 +167,7 @@ def coco_eval(model, val_dataloader, cocoGt, encoder, inv_map, args):
                         img_id = img_id.cpu().numpy()
                         # Iterate over batch elements
                         for img_id_, wtot_, htot_, result in zip(img_id, wtot, htot, results):
-                            loc, label, prob = [r.cpu().numpy() for r in result]
+                            loc, label, prob = [r.to(torch.float32).cpu().numpy() for r in result] 
                             # Iterate over image detections
                             for loc_, label_, prob_ in zip(loc, label, prob):
                                 ret.append([img_id_, loc_[0]*wtot_, \
@@ -230,20 +230,21 @@ def coco_eval(model, val_dataloader, cocoGt, encoder, inv_map, args):
                     if nbatch == args.iteration:
                         break
 
-    print("Predicting Ended, total time: {:.2f} s".format(time.time()-start))
-
     batch_size = args.batch_size
-    latency = inference_time.avg / batch_size * 1000
-    perf = batch_size / inference_time.avg
-    print('inference latency %.2f ms'%latency)
-    print('inference performance %.2f fps'%perf)
+    latency_inference = inference_time.avg / batch_size
+    # perf = batch_size / inference_time.avg
+    # print('inference latency %.2f ms'%latency)
+    # print('inference performance %.2f fps'%perf)
 
     if not args.dummy:
-        latency = decoding_time.avg / batch_size * 1000
-        perf = batch_size / decoding_time.avg
-        print('decoding latency %.2f ms'%latency)
-        print('decodingperformance %.2f fps'%perf)
-
+        latency_decode = decoding_time.avg / batch_size
+        # perf = batch_size / decoding_time.avg
+        # print('decoding latency %.2f ms'%latency)
+        # print('decodingperformance %.2f fps'%perf)
+        total_lantency=latency_inference+latency_decode
+        total_perf=args.batch_size/total_lantency
+        print("Throughput: {:.2f} fps".format(total_perf))
+        # print('decodingperformance %.2f fps'%perf)
         cocoDt = cocoGt.loadRes(np.array(ret))
 
         E = COCOeval(cocoGt, cocoDt, iouType='bbox')
